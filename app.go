@@ -24,11 +24,32 @@ func main() {
 	writer := bufio.NewWriter(os.Stdout)
 	buffedFile := bytes.NewReader(fileToScan)
 
-	scannedFile := bufio.NewScanner(buffedFile)
-	scannedFile.Split(bufio.ScanWords)
+	scanFileForKeyword(start, timeout, buffedFile)
 
+	writer.Flush()
+
+	end := time.Now()
+	log.Println("finished", end.Sub(start))
+}
+
+func checkForError(err error) {
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func getElapsedTime(start time.Time, name string) time.Duration {
+	elapsed := time.Since(start)
+	log.Printf("%s took %s", name, elapsed)
+
+	return elapsed
+}
+
+func scanFileForKeyword(start time.Time, timeout time.Duration, file *bytes.Reader) {
+	scannedFile := bufio.NewScanner(file)
+	scannedFile.Split(bufio.ScanWords)
 	for scannedFile.Scan() {
-		elapsed := time.Since(start)
+		elapsed := getElapsedTime(start, "file-scan")
 
 		if elapsed > timeout {
 			fmt.Println("the process has timed out - elapsed:", elapsed)
@@ -42,17 +63,6 @@ func main() {
 		}
 	}
 	if err := scannedFile.Err(); err != nil {
-		log.Fatal(err)
-	}
-
-	writer.Flush()
-
-	end := time.Now()
-	log.Println("finished", end.Sub(start))
-}
-
-func checkForError(err error) {
-	if err != nil {
 		log.Fatal(err)
 	}
 }
