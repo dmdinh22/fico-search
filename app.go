@@ -7,9 +7,20 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
+
+type ScannerByteCounter struct {
+	BytesRead int
+}
+
+type ResponseData struct {
+	TimeElapsed int
+	BytesRead   int
+	Status      string
+}
 
 func main() {
 	start := time.Now()
@@ -40,14 +51,17 @@ func checkForError(err error) {
 
 func getElapsedTime(start time.Time, name string) time.Duration {
 	elapsed := time.Since(start)
-	log.Printf("%s took %s", name, elapsed)
+	// log.Printf("%s took %s", name, elapsed)
 
 	return elapsed
 }
 
 func scanFileForKeyword(start time.Time, timeout time.Duration, file *bytes.Reader) {
+	byteCtr := ScannerByteCounter{}
 	scannedFile := bufio.NewScanner(file)
-	scannedFile.Split(bufio.ScanWords)
+	splitFunc := byteCtr.Wrap(bufio.ScanWords)
+	scannedFile.Split(splitFunc)
+
 	for scannedFile.Scan() {
 		elapsed := getElapsedTime(start, "file-scan")
 
@@ -58,11 +72,29 @@ func scanFileForKeyword(start time.Time, timeout time.Duration, file *bytes.Read
 
 		word := scannedFile.Bytes()
 		wordAsString := strings.ToLower(string(word))
-		if strings.Contains(wordAsString, "fico") {
+		matchedKeyword, err := regexp.MatchString("\\bfico\\b", wordAsString)
+		checkForError(err)
+
+		if matchedKeyword {
+			elapsedForMatch := getElapsedTime(start, "matched")
 			fmt.Println(wordAsString)
+			fmt.Printf("Split Text: %s\n", scannedFile.Text())
+			fmt.Printf("Bytes Read: %d\n\n", byteCtr.BytesRead)
+			matchedData := ResponseData{TimeElapsed: int(elapsedForMatch), BytesRead: byteCtr.BytesRead, Status: "Success!"}
+
+			fmt.Print(matchedData)
 		}
 	}
 	if err := scannedFile.Err(); err != nil {
 		log.Fatal(err)
+	}
+}
+
+// SplitFunc returns amt of bytes forward scanner advances
+func (byteCtr *ScannerByteCounter) Wrap(split bufio.SplitFunc) bufio.SplitFunc {
+	return func(data []byte, atEOF bool) (int, []byte, error) {
+		bytesToAdvance, token, err := split(data, atEOF)
+		byteCtr.BytesRead += bytesToAdvance
+		return bytesToAdvance, token, err
 	}
 }
