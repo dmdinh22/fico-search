@@ -2,9 +2,8 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"os"
 	"regexp"
@@ -13,7 +12,8 @@ import (
 	"time"
 )
 
-const mb = 1024 * 1024
+const kb = 1024
+const mb = 1024 * kb
 const gb = 1024 * mb
 
 // Go doesn't have a native enum type
@@ -35,40 +35,68 @@ type ResponseData struct {
 	Status    string
 }
 
+type ScanFileParams struct {
+	start   time.Time
+	timeout time.Duration
+	file    string
+	offset  int64
+	limit   int64
+	channel chan (string)
+}
+
 func main() {
 	start := time.Now()
 	timeout := 60 * 1000 * time.Millisecond //!TODO use 60s as def, 10s for testing for now
+	file := "./smallSample.txt"
 
-	fileInfo, err := os.Stat("./smallSample.txt")
+	fileInfo, err := os.Stat(file)
 	checkForError(err)
 	fmt.Printf("the file is %d bytes long", fileInfo.Size())
-
-	fileToScan, err := ioutil.ReadFile("./smallSample.txt")
-	checkForError(err)
 	writer := bufio.NewWriter(os.Stdout)
-	buffedFile := bytes.NewReader(fileToScan)
 
-	waitGroup := sync.WaitGroup{} // waits for all goroutines to complete
-	channel := make(chan (string))
+	channel := make(chan (string)) // channel used to scan the files for words in multiple goroutines
+	waitGroup := sync.WaitGroup{}  // waits for all goroutines to complete
+	// channel := make(chan (string)) // channel used to scan the files for words in multiple goroutines
+	dict := make(map[string]int) // stores key of elapsed time and value of response struct
+	done := make(chan (bool), 1) // channel to signal parent that data has been entered into dict
+
+	// read all incoming words from channel and count
+	go func() {
+		for str := range channel {
+			//TODO: make map of time and data
+			// fmt.Print("response from channel", response)
+			dict[str]++
+		}
+
+		// let parent know that dict has been updated
+		done <- true
+	}()
+
 	var currentBytePos int64
-	var limit int64 = 500 * mb
+	var limit int64 = 5 * kb // sets limit of data chunk per goroutine
 
 	for i := 0; i < 10; i++ {
 		waitGroup.Add(1)
 		fmt.Printf("thread %d started \n", i)
 
 		go func() {
-			scanFileForKeyword(start, timeout, buffedFile, currentBytePos, channel)
-			fmt.Printf("%d thread completed \n", i)
+			params := ScanFileParams{start, timeout, file, currentBytePos, limit, channel}
+			go scanFileForKeyword(params)
+
+			fmt.Printf("thread %d completed \n", i)
 			waitGroup.Done()
 		}()
-		// inc the byte pos by 1+ (lastbyte read by the prev thread)
+		// increment byte pos by 1 + (lastbyte read by the prev thread)
 		currentBytePos += limit + 1
 	}
 
 	waitGroup.Wait()
 	close(channel)
 	writer.Flush()
+
+	// wait for dict to process data
+	<-done
+	close(done)
 
 	end := time.Now()
 	log.Println("finished", end.Sub(start))
