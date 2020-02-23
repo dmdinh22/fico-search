@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +16,8 @@ import (
 const kb = 1024
 const mb = 1024 * kb
 const gb = 1024 * mb
+
+var outputList []ResponseData
 
 // Go doesn't have a native enum type
 type StatusType string
@@ -30,7 +33,7 @@ type ScannerByteCounter struct {
 }
 
 type ResponseData struct {
-	Elapsed   int
+	Elapsed   int // in ms
 	ByteCount int
 	Status    string
 }
@@ -98,6 +101,14 @@ func main() {
 	<-done
 	close(done)
 
+	// sort by elapsed time desc
+	sort.Slice(outputList, func(a, b int) bool {
+		return outputList[a].Elapsed > outputList[b].Elapsed
+	})
+
+	// print out list
+	fmt.Print(outputList)
+
 	end := time.Now()
 	log.Println("finished", end.Sub(start))
 }
@@ -113,16 +124,39 @@ func getElapsedTime(start time.Time, name string) time.Duration {
 	return elapsed
 }
 
-func scanFileForKeyword(start time.Time, timeout time.Duration, file *bytes.Reader, offset int64, channel chan (string)) {
-	byteCtr := ScannerByteCounter{}
-	scannedFile := bufio.NewScanner(file)
-	splitFunc := byteCtr.Wrap(bufio.ScanWords)
-	scannedFile.Split(splitFunc)
+func scanFileForKeyword(input ScanFileParams, wg *sync.WaitGroup) {
+	fileToRead, err := os.Open(input.file)
+	checkForError(err)
+	defer fileToRead.Close()
 
-	for scannedFile.Scan() {
-		elapsed := getElapsedTime(start, "file-scan")
+	// move ptr to start of current chunk
+	fileToRead.Seek(input.offset, 0)
+	reader := bufio.NewReader(fileToRead)
 
-		if elapsed > timeout {
+	// if there is an offset, we need to shift bytes to the end of the word so the chunk starts at a new word
+	if input.offset != 0 {
+		_, err = reader.ReadBytes(' ')
+		if err == io.EOF {
+			fmt.Println("EOF")
+			// EOF is a failure
+			failedToMatch := ResponseData{Status: Fail}
+			fmt.Print(failedToMatch)
+			return
+		}
+
+		if err != nil {
+			// program errored out - failure
+			failedToMatch := ResponseData{Status: Fail}
+			fmt.Print(failedToMatch)
+			panic(err)
+		}
+	}
+
+	var bytesReadSize int64
+	for {
+		// get elapsed time and check against timeout
+		elapsed := getElapsedTime(input.start, "file-scan")
+		if elapsed > input.timeout {
 			fmt.Println("the process has timed out - elapsed:", elapsed)
 			timedOutResponse := ResponseData{Status: TO}
 			fmt.Print(timedOutResponse)
@@ -130,29 +164,49 @@ func scanFileForKeyword(start time.Time, timeout time.Duration, file *bytes.Read
 			return
 		}
 
-		word := scannedFile.Bytes()
-		wordAsString := strings.ToLower(string(word))
-		matchedKeyword, err := regexp.MatchString("\\bfico\\b", wordAsString)
+		// if the size has exceeded chunk limit, break out
+		if bytesReadSize > input.limit {
+			break
+		}
+
+		bytesRead, err := reader.ReadBytes(' ')
+
+		// break for end of file
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			failedToMatch := ResponseData{Status: Fail}
+			fmt.Print(failedToMatch)
+			panic(err)
+		}
+
+		bytesReadSize += int64(len(bytesRead))
+		bytesToStr := strings.TrimSpace(string(bytesRead))
+		lowercasedWord := strings.ToLower(string(bytesToStr))
+		matchedKeyword, err := regexp.MatchString("\\bfico\\b", lowercasedWord)
 		checkForError(err)
 
-		if matchedKeyword {
-			elapsedForMatch := getElapsedTime(start, "matched")
-			// fmt.Println(wordAsString)
-			// fmt.Printf("Split Text: %s\n", scannedFile.Text())
-			// fmt.Printf("Bytes Read: %d\n\n", byteCtr.BytesRead)
-			matchedData := ResponseData{Elapsed: int(elapsedForMatch), ByteCount: byteCtr.BytesRead, Status: Succ}
+		if lowercasedWord != "" {
+			// Send the read word in the channel to enter into dictionary.
+			input.channel <- lowercasedWord
+		}
+
+		if lowercasedWord != "" && matchedKeyword {
+			elapsedForMatch := getElapsedTime(input.start, "matched")
+			// fmt.Println(lowercasedWord)
+			// fmt.Printf("Bytes Read from byteCtr: %d\n\n", byteCtr.BytesRead)
+			// fmt.Printf("Bytes Read from bytesRead incrementor: %d\n\n", bytesReadSize)
+
+			matchedData := ResponseData{Elapsed: int(elapsedForMatch), ByteCount: int(bytesReadSize), Status: Succ}
 
 			fmt.Print(matchedData)
-			//TODO: add to list to log out later
+			fmt.Println("\n")
+			// input.channel <- matchedData
+			outputList = append(outputList, matchedData)
 		}
 	}
-
-	if err := scannedFile.Err(); err != nil {
-		log.Fatal(err)
-	}
-
-	failedToMatch := ResponseData{Status: Fail}
-	fmt.Print(failedToMatch)
 }
 
 // SplitFunc returns amt of bytes forward scanner advances
