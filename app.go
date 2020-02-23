@@ -48,50 +48,59 @@ type ScanFileParams struct {
 }
 
 func main() {
+	// Set the format of the logger
+	log.SetFlags(log.Ldate | log.Lmicroseconds)
+
 	start := time.Now()
-	timeout := 60 * 1000 * time.Millisecond //!TODO use 60s as def, 10s for testing for now
-	file := "./smallSample.txt"
+	//!TODO use 60s as def, 10s for testing for now
+	timeout := 10 * 1000 * time.Millisecond
+	// timeout := 60 * 1000 * time.Millisecond
+	file := "./tmp/smallSample.txt"
+	// fileInput := os.Stdin
 
 	fileInfo, err := os.Stat(file)
 	checkForError(err)
-	fmt.Printf("the file is %d bytes long", fileInfo.Size())
-	writer := bufio.NewWriter(os.Stdout)
+	fmt.Printf("the file is %d bytes long:\n", fileInfo.Size())
 
+	writer := bufio.NewWriter(os.Stdout)
 	channel := make(chan (string)) // channel used to scan the files for words in multiple goroutines
+	done := make(chan (bool), 1)   // channel to signal parent that data has been entered into dict
 	waitGroup := sync.WaitGroup{}  // waits for all goroutines to complete
-	// channel := make(chan (string)) // channel used to scan the files for words in multiple goroutines
-	dict := make(map[string]int) // stores key of elapsed time and value of response struct
-	done := make(chan (bool), 1) // channel to signal parent that data has been entered into dict
+	dict := make(map[string]int)   // stores key of elapsed time and value of response struct
+	var currentBytePos int64
+	var limit int64 = 1 * mb // sets limit of data chunk per goroutine
 
 	// read all incoming words from channel and count
 	go func() {
 		for str := range channel {
 			//TODO: make map of time and data
-			// fmt.Print("response from channel", response)
+			// fmt.Print("str from channel", str)
 			dict[str]++
 		}
 
+		fmt.Println(dict)
 		// let parent know that dict has been updated
 		done <- true
 	}()
 
-	var currentBytePos int64
-	var limit int64 = 5 * kb // sets limit of data chunk per goroutine
+	// for i := 0; i < 10; i++ {
+	waitGroup.Add(1)
+	defer waitGroup.Wait()
+	fmt.Printf("thread started \n")
 
-	for i := 0; i < 10; i++ {
-		waitGroup.Add(1)
-		fmt.Printf("thread %d started \n", i)
+	go (func() {
+		params := ScanFileParams{start, timeout, file, currentBytePos, limit, channel}
+		go scanFileForKeyword(params, waitGroup)
 
-		go func() {
-			params := ScanFileParams{start, timeout, file, currentBytePos, limit, channel}
-			go scanFileForKeyword(params)
+		fmt.Printf("thread completed \n")
+		waitGroup.Done()
+	})()
+	// increment byte pos by  lastbyte read by the prev thread + 1 (account for EOL)
+	currentBytePos += limit + 1
+	// }
 
-			fmt.Printf("thread %d completed \n", i)
-			waitGroup.Done()
-		}()
-		// increment byte pos by 1 + (lastbyte read by the prev thread)
-		currentBytePos += limit + 1
-	}
+	// params := ScanFileParams{start, timeout, file, currentBytePos, limit, channel}
+	// scanFileForKeyword(params, waitGroup)
 
 	waitGroup.Wait()
 	close(channel)
@@ -124,7 +133,10 @@ func getElapsedTime(start time.Time, name string) time.Duration {
 	return elapsed
 }
 
-func scanFileForKeyword(input ScanFileParams, wg *sync.WaitGroup) {
+func scanFileForKeyword(input ScanFileParams, wg sync.WaitGroup) {
+	// Decreasing internal counter for wait-group as soon as goroutine finishes
+	defer wg.Done()
+
 	fileToRead, err := os.Open(input.file)
 	checkForError(err)
 	defer fileToRead.Close()
@@ -140,6 +152,7 @@ func scanFileForKeyword(input ScanFileParams, wg *sync.WaitGroup) {
 			fmt.Println("EOF")
 			// EOF is a failure
 			failedToMatch := ResponseData{Status: Fail}
+			outputList = append(outputList, failedToMatch)
 			fmt.Print(failedToMatch)
 			return
 		}
@@ -147,6 +160,7 @@ func scanFileForKeyword(input ScanFileParams, wg *sync.WaitGroup) {
 		if err != nil {
 			// program errored out - failure
 			failedToMatch := ResponseData{Status: Fail}
+			outputList = append(outputList, failedToMatch)
 			fmt.Print(failedToMatch)
 			panic(err)
 		}
@@ -159,8 +173,7 @@ func scanFileForKeyword(input ScanFileParams, wg *sync.WaitGroup) {
 		if elapsed > input.timeout {
 			fmt.Println("the process has timed out - elapsed:", elapsed)
 			timedOutResponse := ResponseData{Status: TO}
-			fmt.Print(timedOutResponse)
-			log.Fatal("timed out...")
+			outputList = append(outputList, timedOutResponse)
 			return
 		}
 
@@ -178,14 +191,17 @@ func scanFileForKeyword(input ScanFileParams, wg *sync.WaitGroup) {
 
 		if err != nil {
 			failedToMatch := ResponseData{Status: Fail}
-			fmt.Print(failedToMatch)
+			outputList = append(outputList, failedToMatch)
 			panic(err)
 		}
 
+		removeSpecial := regexp.MustCompile(`(?m)[^a-z]`)
 		bytesReadSize += int64(len(bytesRead))
 		bytesToStr := strings.TrimSpace(string(bytesRead))
 		lowercasedWord := strings.ToLower(string(bytesToStr))
-		matchedKeyword, err := regexp.MatchString("\\bfico\\b", lowercasedWord)
+		sanitizedWord := strings.Replace(lowercasedWord, "\n", "", -1)
+		sanitizedWord = removeSpecial.ReplaceAllString(sanitizedWord, "")
+		matchedKeyword, err := regexp.MatchString("\\bfico\\b", sanitizedWord)
 		checkForError(err)
 
 		if lowercasedWord != "" {
@@ -195,25 +211,50 @@ func scanFileForKeyword(input ScanFileParams, wg *sync.WaitGroup) {
 
 		if lowercasedWord != "" && matchedKeyword {
 			elapsedForMatch := getElapsedTime(input.start, "matched")
-			// fmt.Println(lowercasedWord)
-			// fmt.Printf("Bytes Read from byteCtr: %d\n\n", byteCtr.BytesRead)
-			// fmt.Printf("Bytes Read from bytesRead incrementor: %d\n\n", bytesReadSize)
-
 			matchedData := ResponseData{Elapsed: int(elapsedForMatch), ByteCount: int(bytesReadSize), Status: Succ}
 
 			fmt.Print(matchedData)
 			fmt.Println("\n")
-			// input.channel <- matchedData
+			input.channel <- matchedData.Status
 			outputList = append(outputList, matchedData)
 		}
 	}
 }
 
-// SplitFunc returns amt of bytes forward scanner advances
-func (byteCtr *ScannerByteCounter) Wrap(split bufio.SplitFunc) bufio.SplitFunc {
-	return func(data []byte, atEOF bool) (int, []byte, error) {
-		bytesToAdvance, token, err := split(data, atEOF)
-		byteCtr.BytesRead += bytesToAdvance
-		return bytesToAdvance, token, err
-	}
-}
+// func startWorker(lines <-chan string) <-chan string {
+// 	finished := make(chan string)
+// 	go func() {
+// 		defer close(finished)
+// 		for line := range lines {
+// 			// Do your heavy work here
+// 			finished <- line
+// 		}
+// 	}()
+// 	return finished
+// }
+
+// func merge(cs ...<-chan string) <-chan string {
+// 	var wg sync.WaitGroup
+// 	out := make(chan string)
+
+// 	// Start an output goroutine for each input channel in cs.  output
+// 	// copies values from c to out until c is closed, then calls wg.Done.
+// 	output := func(c <-chan string) {
+// 		for n := range c {
+// 			out <- n
+// 		}
+// 		wg.Done()
+// 	}
+// 	wg.Add(len(cs))
+// 	for _, c := range cs {
+// 		go output(c)
+// 	}
+
+// 	// Start a goroutine to close out once all the output goroutines are
+// 	// done.  This must start after the wg.Add call.
+// 	go func() {
+// 		wg.Wait()
+// 		close(out)
+// 	}()
+// 	return out
+// }
