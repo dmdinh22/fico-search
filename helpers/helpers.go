@@ -12,7 +12,7 @@ func CheckForError(err error) {
 	}
 }
 
-func GetElapsedTime(start time.Time, name string) time.Duration {
-	elapsed := time.Since(start) // time.Duration return is in nanoseconds
-	return elapsed / 1000        // get ms
+func GetElapsedTime(start time.Time, name string) int64 {
+	elapsed := time.Since(start).Milliseconds() // time.Duration return is in nanoseconds
+	return elapsed
 }

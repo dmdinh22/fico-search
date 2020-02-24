@@ -163,7 +163,7 @@ func scanFileForKeyword(input ScanFileParams, wg *sync.WaitGroup) {
 	for {
 		// get elapsed time and check against timeout
 		elapsed := helpers.GetElapsedTime(input.start, "file-scan")
-		if elapsed > input.timeout {
+		if time.Duration(elapsed) > input.timeout {
 			timedOutResponse := ResponseData{Status: TO}
 			input.matchedResults <- timedOutResponse
 			return
@@ -247,7 +247,7 @@ func ScanFileForKeyword(input ScanFileParams, wg *sync.WaitGroup) {
 	for {
 		// get elapsed time and check against timeout
 		elapsed := helpers.GetElapsedTime(input.start, "file-scan")
-		if elapsed > input.timeout {
+		if time.Duration(elapsed) > input.timeout {
 			timedOutResponse := ResponseData{Status: TO}
 			input.matchedResults <- timedOutResponse
 			return
