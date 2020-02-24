@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"flag"
-	"fmt"
 	"io"
 	"log"
 	"os"
@@ -15,11 +14,27 @@ import (
 	"time"
 
 	"github.com/akamensky/argparse"
+	"github.com/dmdinh22/fico-search/helpers"
 	"github.com/olekukonko/tablewriter"
 )
 
 var outputList []ResponseData
 var failedToMatch = ResponseData{Status: Fail}
+
+type ScanFileParams struct {
+	start          time.Time
+	timeout        time.Duration
+	file           *string
+	offset         int64
+	limit          int64
+	matchedResults chan ResponseData
+}
+
+type ResponseData struct {
+	Elapsed   int64 // in ms
+	ByteCount int64
+	Status    string
+}
 
 // Go doesn't have a native enum type
 type StatusType string
@@ -34,26 +49,12 @@ type ScannerByteCounter struct {
 	BytesRead int
 }
 
-type ResponseData struct {
-	Elapsed   int64 // in ms
-	ByteCount int64
-	Status    string
-}
-
-type ScanFileParams struct {
-	start          time.Time
-	timeout        time.Duration
-	file           *string
-	offset         int64
-	limit          int64
-	matchedResults chan ResponseData
-}
-
 func main() {
 	// set format of the logger to not output timestamp
 	log.SetFlags(0)
 	start := time.Now()
-	timeout := 60 * 1000 * time.Millisecond
+	log.Printf("Started to process file at %s.", start)
+	timeout := 60 * time.Millisecond
 
 	parser := argparse.NewParser("fico-search", "This program takes in a file, reads and searches for the keyword 'fico' concurrently using go-routines.")
 	file := parser.String("f", "file", &argparse.Options{Required: true, Help: "Flag to pass arg with path of a file to process."})
@@ -61,7 +62,7 @@ func main() {
 
 	// parse input from args
 	err := parser.Parse(os.Args)
-	checkForError(err)
+	helpers.CheckForError(err)
 
 	if *file == "" {
 		flag.PrintDefaults()
@@ -69,11 +70,11 @@ func main() {
 	}
 
 	if timeoutArg != nil && *timeoutArg > 0 {
-		timeout = time.Duration(int64(*timeoutArg)) * 1000 * time.Millisecond // convert to ms
+		timeout = time.Duration(int64(*timeoutArg)) * time.Millisecond // convert to ms
 	}
 
 	fileInfo, err := os.Stat(*file)
-	checkForError(err)
+	helpers.CheckForError(err)
 	fileSize := fileInfo.Size()
 
 	matchedResults := make(chan (ResponseData)) // matchedResults used to scan the files for words in multiple goroutines
@@ -101,7 +102,8 @@ func main() {
 	close(done)
 
 	end := time.Now()
-	log.Printf("File search completed in %d ms.", end.Sub(start)/1000)
+	endTime := end.Sub(start) / 1000 / 1000 // convert to ms
+	log.Printf("File search completed in %d ms.", endTime)
 
 	printOutput(outputList)
 }
@@ -120,6 +122,174 @@ func addWorkersToWaitGroup(params ScanFileParams) {
 
 	waitGroup.Wait()
 	close(params.matchedResults)
+}
+
+func scanFileForKeyword(input ScanFileParams, wg *sync.WaitGroup) {
+	// Decreasing internal counter for wait-group as soon as goroutine finishes
+	defer wg.Done()
+
+	//early bail
+	if len(outputList) > 10 {
+		return
+	}
+
+	fileToRead, err := os.Open(*input.file)
+	helpers.CheckForError(err)
+	defer fileToRead.Close()
+
+	// move ptr to start of current chunk
+	fileToRead.Seek(input.offset, 0)
+	reader := bufio.NewReader(fileToRead)
+
+	// if there is an offset, we need to shift bytes to the end of the word so the chunk starts at a new word
+	if input.offset != 0 {
+		_, err = reader.ReadBytes(' ')
+		if err == io.EOF {
+			log.Println(err)
+			// EOF is a failure
+			input.matchedResults <- failedToMatch
+			return
+		}
+
+		if err != nil {
+			// program errored out - failure
+			input.matchedResults <- failedToMatch
+			log.Println(err)
+			return
+		}
+	}
+
+	var bytesReadSize int64
+	for {
+		// get elapsed time and check against timeout
+		elapsed := helpers.GetElapsedTime(input.start, "file-scan")
+		if elapsed > input.timeout {
+			timedOutResponse := ResponseData{Status: TO}
+			input.matchedResults <- timedOutResponse
+			return
+		}
+
+		// if the size has exceeded chunk limit, break out
+		if bytesReadSize > input.limit {
+			break
+		}
+
+		bytesRead, err := reader.ReadBytes(' ')
+
+		// break for end of file
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			input.matchedResults <- failedToMatch
+			log.Println(err)
+			return
+		}
+
+		removeSpecial := regexp.MustCompile(`(?m)[^a-z]`)
+		bytesReadSize += int64(len(bytesRead))
+		bytesToStr := strings.TrimSpace(string(bytesRead))
+		lowercasedWord := strings.ToLower(string(bytesToStr))
+		sanitizedWord := strings.Replace(lowercasedWord, "\n", "", -1)
+		sanitizedWord = removeSpecial.ReplaceAllString(sanitizedWord, "")
+		matchedKeyword, err := regexp.MatchString("\\bfico\\b", sanitizedWord)
+		// CheckForError(err)
+		elapsedForMatch := helpers.GetElapsedTime(input.start, "matched")
+
+		if lowercasedWord != "" && matchedKeyword {
+			matchedData := ResponseData{Elapsed: int64(elapsedForMatch), ByteCount: int64(bytesReadSize), Status: Succ}
+			input.matchedResults <- matchedData
+			return
+		}
+	}
+
+	// if file chunk completed reading without a match, it's a fail
+	input.matchedResults <- failedToMatch
+}
+
+func ScanFileForKeyword(input ScanFileParams, wg *sync.WaitGroup) {
+	// Decreasing internal counter for wait-group as soon as goroutine finishes
+	defer wg.Done()
+
+	//early bail
+	if len(outputList) > 10 {
+		return
+	}
+
+	fileToRead, err := os.Open(*input.file)
+	helpers.CheckForError(err)
+	defer fileToRead.Close()
+
+	// move ptr to start of current chunk
+	fileToRead.Seek(input.offset, 0)
+	reader := bufio.NewReader(fileToRead)
+
+	// if there is an offset, we need to shift bytes to the end of the word so the chunk starts at a new word
+	if input.offset != 0 {
+		_, err = reader.ReadBytes(' ')
+		if err == io.EOF {
+			log.Println(err)
+			// EOF is a failure
+			input.matchedResults <- failedToMatch
+			return
+		}
+
+		if err != nil {
+			// program errored out - failure
+			input.matchedResults <- failedToMatch
+			log.Println(err)
+			return
+		}
+	}
+
+	var bytesReadSize int64
+	for {
+		// get elapsed time and check against timeout
+		elapsed := helpers.GetElapsedTime(input.start, "file-scan")
+		if elapsed > input.timeout {
+			timedOutResponse := ResponseData{Status: TO}
+			input.matchedResults <- timedOutResponse
+			return
+		}
+
+		// if the size has exceeded chunk limit, break out
+		if bytesReadSize > input.limit {
+			break
+		}
+
+		bytesRead, err := reader.ReadBytes(' ')
+
+		// break for end of file
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			input.matchedResults <- failedToMatch
+			log.Println(err)
+			return
+		}
+
+		removeSpecial := regexp.MustCompile(`(?m)[^a-z]`)
+		bytesReadSize += int64(len(bytesRead))
+		bytesToStr := strings.TrimSpace(string(bytesRead))
+		lowercasedWord := strings.ToLower(string(bytesToStr))
+		sanitizedWord := strings.Replace(lowercasedWord, "\n", "", -1)
+		sanitizedWord = removeSpecial.ReplaceAllString(sanitizedWord, "")
+		matchedKeyword, err := regexp.MatchString("\\bfico\\b", sanitizedWord)
+		helpers.CheckForError(err)
+		elapsedForMatch := helpers.GetElapsedTime(input.start, "matched")
+
+		if lowercasedWord != "" && matchedKeyword {
+			matchedData := ResponseData{Elapsed: int64(elapsedForMatch), ByteCount: int64(bytesReadSize), Status: Succ}
+			input.matchedResults <- matchedData
+			return
+		}
+	}
+
+	// if file chunk completed reading without a match, it's a fail
+	input.matchedResults <- failedToMatch
 }
 
 func printOutput(outputList []ResponseData) {
@@ -164,101 +334,4 @@ func printOutput(outputList []ResponseData) {
 		}
 	}
 	table.Render()
-}
-
-func checkForError(err error) {
-	if err != nil {
-		// log defaults output to stdout: https://golang.org/src/log/log.go#L58
-		log.Println(err)
-	}
-}
-
-func getElapsedTime(start time.Time, name string) time.Duration {
-	elapsed := time.Since(start) // time.Duration return is in nanoseconds
-	return elapsed / 1000        // get ms
-}
-
-func scanFileForKeyword(input ScanFileParams, wg *sync.WaitGroup) {
-	// Decreasing internal counter for wait-group as soon as goroutine finishes
-	defer wg.Done()
-
-	//early bail
-	if len(outputList) > 10 {
-		return
-	}
-
-	fileToRead, err := os.Open(*input.file)
-	checkForError(err)
-	defer fileToRead.Close()
-
-	// move ptr to start of current chunk
-	fileToRead.Seek(input.offset, 0)
-	reader := bufio.NewReader(fileToRead)
-
-	// if there is an offset, we need to shift bytes to the end of the word so the chunk starts at a new word
-	if input.offset != 0 {
-		_, err = reader.ReadBytes(' ')
-		if err == io.EOF {
-			log.Println(err)
-			// EOF is a failure
-			input.matchedResults <- failedToMatch
-			return
-		}
-
-		if err != nil {
-			// program errored out - failure
-			input.matchedResults <- failedToMatch
-			log.Println(err)
-			return
-		}
-	}
-
-	var bytesReadSize int64
-	for {
-		// get elapsed time and check against timeout
-		elapsed := getElapsedTime(input.start, "file-scan")
-		if elapsed > input.timeout {
-			fmt.Println("the process has timed out - elapsed:", elapsed)
-			timedOutResponse := ResponseData{Status: TO}
-			input.matchedResults <- timedOutResponse
-			return
-		}
-
-		// if the size has exceeded chunk limit, break out
-		if bytesReadSize > input.limit {
-			break
-		}
-
-		bytesRead, err := reader.ReadBytes(' ')
-
-		// break for end of file
-		if err == io.EOF {
-			break
-		}
-
-		if err != nil {
-			input.matchedResults <- failedToMatch
-			log.Println(err)
-			return
-		}
-
-		removeSpecial := regexp.MustCompile(`(?m)[^a-z]`)
-		bytesReadSize += int64(len(bytesRead))
-		bytesToStr := strings.TrimSpace(string(bytesRead))
-		lowercasedWord := strings.ToLower(string(bytesToStr))
-		sanitizedWord := strings.Replace(lowercasedWord, "\n", "", -1)
-		sanitizedWord = removeSpecial.ReplaceAllString(sanitizedWord, "")
-		matchedKeyword, err := regexp.MatchString("\\bfico\\b", sanitizedWord)
-		checkForError(err)
-		elapsedForMatch := getElapsedTime(input.start, "matched")
-
-		if lowercasedWord != "" && matchedKeyword {
-			matchedData := ResponseData{Elapsed: int64(elapsedForMatch), ByteCount: int64(bytesReadSize), Status: Succ}
-			input.matchedResults <- matchedData
-			return
-		}
-	}
-
-	// if file chunk completed reading without a match, it's a fail
-	input.matchedResults <- failedToMatch
 }
