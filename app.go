@@ -53,7 +53,6 @@ func main() {
 	// set format of the logger to not output timestamp
 	log.SetFlags(0)
 	start := time.Now()
-	log.Printf("Started to process file at %s.", start)
 	timeout := 60 * time.Millisecond
 
 	parser := argparse.NewParser("fico-search", "This program takes in a file, reads and searches for the keyword 'fico' concurrently using go-routines.")
@@ -73,6 +72,7 @@ func main() {
 		timeout = time.Duration(int64(*timeoutArg)) * time.Millisecond // convert to ms
 	}
 
+	log.Printf("Started to process file at %s.", start)
 	fileInfo, err := os.Stat(*file)
 	helpers.CheckForError(err)
 	fileSize := fileInfo.Size()
