@@ -57,7 +57,7 @@ func main() {
 
 	parser := argparse.NewParser("fico-search", "This program takes in a file, reads and searches for the keyword 'fico' concurrently using go-routines.")
 	file := parser.String("f", "file", &argparse.Options{Required: true, Help: "Flag to pass arg with path of a file to process."})
-	timeoutArg := parser.Int("t", "timeout", &argparse.Options{Required: false, Help: "Flag to pass in desired time in seconds for program timeout."})
+	timeoutArg := parser.Int("t", "timeout", &argparse.Options{Required: false, Help: "Flag to pass in desired time in seconds for program timeout. (default 60s)"})
 
 	// parse input from args
 	err := parser.Parse(os.Args)
