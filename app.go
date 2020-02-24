@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -51,36 +52,34 @@ type ScanFileParams struct {
 func main() {
 	// set format of the logger to not output timestamp
 	log.SetFlags(0)
-
 	start := time.Now()
 	timeout := 60 * 1000 * time.Millisecond
 
 	parser := argparse.NewParser("fico-search", "This program takes in a file, reads and searches for the keyword 'fico' concurrently using go-routines.")
-	file := parser.String("f", "file", &argparse.Options{Required: false, Help: "Pass in file to process."})
-	timeoutArg := parser.Int("t", "timeout", &argparse.Options{Required: false, Help: "Pass in desired time in seconds for program timeout."})
+	file := parser.String("f", "file", &argparse.Options{Required: true, Help: "Flag to pass arg with path of a file to process."})
+	timeoutArg := parser.Int("t", "timeout", &argparse.Options{Required: false, Help: "Flag to pass in desired time in seconds for program timeout."})
 
-	if timeoutArg != nil && *timeoutArg > 0 {
-		timeout = time.Duration(int64(*timeoutArg)) * time.Millisecond
+	// parse input from args
+	err := parser.Parse(os.Args)
+	checkForError(err)
+
+	if *file == "" {
+		flag.PrintDefaults()
+		os.Exit(1)
 	}
 
-	// fmt.Printf("file: %s, timeout: %d \n", *file, *timeoutArg)
-
-	//!test
-	s := parser.String("s", "string", &argparse.Options{Required: true, Help: "String to print"})
-	fmt.Println(*s)
-	// file := "./tmp/sampleInput.txt"
-	// fileInput := os.Stdin
+	if timeoutArg != nil && *timeoutArg > 0 {
+		timeout = time.Duration(int64(*timeoutArg)) * 1000 * time.Millisecond // convert to ms
+	}
 
 	fileInfo, err := os.Stat(*file)
 	checkForError(err)
 	fileSize := fileInfo.Size()
-	fmt.Printf("the file is %d bytes long:\n", fileInfo.Size())
 
 	matchedResults := make(chan (ResponseData)) // matchedResults used to scan the files for words in multiple goroutines
 	done := make(chan (bool), 1)                // matchedResults to signal parent that data has been entered into dict
 	var currentBytePos int64
 	var limit int64 = fileSize / 10 // sets limit of data chunk per goroutine by a tenth of the file size
-	fmt.Println("limit", limit)
 
 	// read all incoming matched words from channel and add to list
 	go func() {
@@ -102,7 +101,7 @@ func main() {
 	close(done)
 
 	end := time.Now()
-	log.Println("finished", end.Sub(start))
+	log.Printf("File search completed in %d ms.", end.Sub(start)/1000)
 
 	printOutput(outputList)
 }
@@ -143,15 +142,11 @@ func printOutput(outputList []ResponseData) {
 
 		totalSumOfBytes += float64(output.ByteCount)
 		totalSumOfTimeInMs += float64(output.Elapsed)
-		fmt.Println(totalSumOfTimeInMs)
 		dataToOutput = append(dataToOutput, lineToAdd)
 	}
-
-	fmt.Println("totalSumOfBytes", totalSumOfBytes)
-	fmt.Println("totalSumOfTimeInMs", totalSumOfTimeInMs)
-
 	averageBytesPerMs := totalSumOfBytes / totalSumOfTimeInMs
-	fmt.Println(averageBytesPerMs)
+
+	// build output table for stdout
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"[elapsed]", "[byte_cnt]", "status]"})
 	table.SetFooter([]string{"", "Average Bytes/ms", strconv.FormatFloat(averageBytesPerMs, 'f', 6, 64)})
