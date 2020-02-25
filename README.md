@@ -18,7 +18,7 @@
   - `GOOS=windows GOARCH=amd64 go build -o fico-search.exe app.go`
 
 ### Running UNIX Shell Executable
-- From the CLI in the dir that contains `fico-search`, run `./fico-search -f PATH/TO/FILE`
-  - ie. `./fico-search ./samples/test.txt`
+- From the CLI in the dir that contains `fico-search`, run `./fico-search-${YOUR_OS} -f PATH/TO/FILE`
+  - ie. `./fico-search-darwin ./samples/test.txt`
 - Set a custom timeout by adding the `-t` flag. ie. `./fico-search -f PATH/TO/FILE -t 120`
   - Timeout defaults to 60s.
