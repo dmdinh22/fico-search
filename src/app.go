@@ -49,6 +49,11 @@ type ScannerByteCounter struct {
 	BytesRead int
 }
 
+func channelMonitor(waitGroup *sync.WaitGroup, responseChanel chan ResponseData) {
+	waitGroup.Wait()
+	close(responseChanel)
+}
+
 func main() {
 	// set format of the logger to not output timestamp
 	log.SetFlags(0)
@@ -77,8 +82,9 @@ func main() {
 	helpers.CheckForError(err)
 	fileSize := fileInfo.Size()
 
+	waitGroup := sync.WaitGroup{}               // waits for all goroutines to complete
 	matchedResults := make(chan (ResponseData)) // matchedResults used to scan the files for words in multiple goroutines
-	done := make(chan (bool), 1)                // matchedResults to signal parent that data has been entered into dict
+	completed := make(chan (bool), 1)           // matchedResults to signal parent that data has been entered into dict
 	var currentBytePos int64
 	var limit int64 = fileSize / 10 // sets limit of data chunk per goroutine by a tenth of the file size
 
@@ -91,15 +97,23 @@ func main() {
 		}
 
 		// let parent know that output list has been completed
-		done <- true
+		completed <- true
 	}()
 
 	params := ScanFileParams{start, timeout, file, currentBytePos, limit, matchedResults}
-	go addWorkersToWaitGroup(params)
+	for i := 0; i < 10; i++ {
+		waitGroup.Add(1)
+		go scanFileForKeyword(params, &waitGroup, matchedResults)
 
-	// wait for channel to process data
-	<-done
-	close(done)
+		// increment byte pos by  lastbyte read by the prev thread + 1 (account for EOL)
+		params.offset += params.limit + 1
+	}
+
+	go channelMonitor(&waitGroup, matchedResults)
+
+	// wait for completed channel to process data
+	<-completed
+	close(completed)
 
 	end := time.Now()
 	endTime := end.Sub(start) / 1000 / 1000 // convert to ms
@@ -108,23 +122,7 @@ func main() {
 	printOutput(outputList)
 }
 
-func addWorkersToWaitGroup(params ScanFileParams) {
-	waitGroup := sync.WaitGroup{} // waits for all goroutines to complete
-
-	// create 10 go-routines and add to waitgroup
-	for i := 0; i < 10; i++ {
-		waitGroup.Add(1)
-		go scanFileForKeyword(params, &waitGroup)
-
-		// increment byte pos by  lastbyte read by the prev thread + 1 (account for EOL)
-		params.offset += params.limit + 1
-	}
-
-	waitGroup.Wait()
-	close(params.matchedResults)
-}
-
-func scanFileForKeyword(input ScanFileParams, wg *sync.WaitGroup) {
+func scanFileForKeyword(input ScanFileParams, wg *sync.WaitGroup, matchedResults chan<- ResponseData) {
 	// Decreasing internal counter for wait-group as soon as goroutine finishes
 	defer wg.Done()
 
