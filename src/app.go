@@ -15,11 +15,12 @@ import (
 
 	"github.com/akamensky/argparse"
 	"github.com/dmdinh22/fico-search/helpers"
+	"github.com/dmdinh22/fico-search/worker"
 	"github.com/olekukonko/tablewriter"
 )
 
-var outputList []ResponseData
-var failedToMatch = ResponseData{Status: Fail}
+var outputList []worker.ResponseData
+var failedToMatch = worker.ResponseData{Status: Fail}
 
 type ScanFileParams struct {
 	start          time.Time
@@ -27,13 +28,7 @@ type ScanFileParams struct {
 	file           *string
 	offset         int64
 	limit          int64
-	matchedResults chan ResponseData
-}
-
-type ResponseData struct {
-	Elapsed   int64 // in ms
-	ByteCount int64
-	Status    string
+	matchedResults chan<- worker.ResponseData
 }
 
 // Go doesn't have a native enum type
@@ -47,11 +42,6 @@ const (
 
 type ScannerByteCounter struct {
 	BytesRead int
-}
-
-func channelMonitor(waitGroup *sync.WaitGroup, responseChanel chan ResponseData) {
-	waitGroup.Wait()
-	close(responseChanel)
 }
 
 func main() {
@@ -82,9 +72,9 @@ func main() {
 	helpers.CheckForError(err)
 	fileSize := fileInfo.Size()
 
-	waitGroup := sync.WaitGroup{}               // waits for all goroutines to complete
-	matchedResults := make(chan (ResponseData)) // matchedResults used to scan the files for words in multiple goroutines
-	completed := make(chan (bool), 1)           // matchedResults to signal parent that data has been entered into dict
+	waitGroup := sync.WaitGroup{}                    // waits for all goroutines to complete
+	matchedResults := make(chan worker.ResponseData) // matchedResults used to scan the files for words in multiple goroutines
+	completed := make(chan (bool), 1)                // matchedResults to signal parent that data has been entered into dict
 	var currentBytePos int64
 	var limit int64 = fileSize / 10 // sets limit of data chunk per goroutine by a tenth of the file size
 
@@ -103,7 +93,7 @@ func main() {
 	params := ScanFileParams{start, timeout, file, currentBytePos, limit, matchedResults}
 	for i := 0; i < 10; i++ {
 		waitGroup.Add(1)
-		go scanFileForKeyword(params, &waitGroup, matchedResults)
+		go worker.ScanFileForKeyword(params, &waitGroup, matchedResults)
 
 		// increment byte pos by  lastbyte read by the prev thread + 1 (account for EOL)
 		params.offset += params.limit + 1
@@ -122,7 +112,12 @@ func main() {
 	printOutput(outputList)
 }
 
-func scanFileForKeyword(input ScanFileParams, wg *sync.WaitGroup, matchedResults chan<- ResponseData) {
+func channelMonitor(waitGroup *sync.WaitGroup, responseChanel chan worker.ResponseData) {
+	waitGroup.Wait()
+	close(responseChanel)
+}
+
+func scanFileForKeyword(input ScanFileParams, wg *sync.WaitGroup) {
 	// Decreasing internal counter for wait-group as soon as goroutine finishes
 	defer wg.Done()
 
@@ -162,7 +157,7 @@ func scanFileForKeyword(input ScanFileParams, wg *sync.WaitGroup, matchedResults
 		// get elapsed time and check against timeout
 		elapsed := helpers.GetElapsedTime(input.start, "file-scan")
 		if time.Duration(elapsed) > input.timeout {
-			timedOutResponse := ResponseData{Status: TO}
+			timedOutResponse := worker.ResponseData{Status: TO}
 			input.matchedResults <- timedOutResponse
 			return
 		}
@@ -192,11 +187,11 @@ func scanFileForKeyword(input ScanFileParams, wg *sync.WaitGroup, matchedResults
 		sanitizedWord := strings.Replace(lowercasedWord, "\n", "", -1)
 		sanitizedWord = removeSpecial.ReplaceAllString(sanitizedWord, "")
 		matchedKeyword, err := regexp.MatchString("\\bfico\\b", sanitizedWord)
-		// CheckForError(err)
+		helper.CheckForError(err)
 		elapsedForMatch := helpers.GetElapsedTime(input.start, "matched")
 
 		if lowercasedWord != "" && matchedKeyword {
-			matchedData := ResponseData{Elapsed: int64(elapsedForMatch), ByteCount: int64(bytesReadSize), Status: Succ}
+			matchedData := worker.ResponseData{Elapsed: int64(elapsedForMatch), ByteCount: int64(bytesReadSize), Status: Succ}
 			input.matchedResults <- matchedData
 			return
 		}
@@ -206,91 +201,7 @@ func scanFileForKeyword(input ScanFileParams, wg *sync.WaitGroup, matchedResults
 	input.matchedResults <- failedToMatch
 }
 
-func ScanFileForKeyword(input ScanFileParams, wg *sync.WaitGroup) {
-	// Decreasing internal counter for wait-group as soon as goroutine finishes
-	defer wg.Done()
-
-	//early bail
-	if len(outputList) > 10 {
-		return
-	}
-
-	fileToRead, err := os.Open(*input.file)
-	helpers.CheckForError(err)
-	defer fileToRead.Close()
-
-	// move ptr to start of current chunk
-	fileToRead.Seek(input.offset, 0)
-	reader := bufio.NewReader(fileToRead)
-
-	// if there is an offset, we need to shift bytes to the end of the word so the chunk starts at a new word
-	if input.offset != 0 {
-		_, err = reader.ReadBytes(' ')
-		if err == io.EOF {
-			log.Println(err)
-			// EOF is a failure
-			input.matchedResults <- failedToMatch
-			return
-		}
-
-		if err != nil {
-			// program errored out - failure
-			input.matchedResults <- failedToMatch
-			log.Println(err)
-			return
-		}
-	}
-
-	var bytesReadSize int64
-	for {
-		// get elapsed time and check against timeout
-		elapsed := helpers.GetElapsedTime(input.start, "file-scan")
-		if time.Duration(elapsed) > input.timeout {
-			timedOutResponse := ResponseData{Status: TO}
-			input.matchedResults <- timedOutResponse
-			return
-		}
-
-		// if the size has exceeded chunk limit, break out
-		if bytesReadSize > input.limit {
-			break
-		}
-
-		bytesRead, err := reader.ReadBytes(' ')
-
-		// break for end of file
-		if err == io.EOF {
-			break
-		}
-
-		if err != nil {
-			input.matchedResults <- failedToMatch
-			log.Println(err)
-			return
-		}
-
-		removeSpecial := regexp.MustCompile(`(?m)[^a-z]`)
-		bytesReadSize += int64(len(bytesRead))
-		bytesToStr := strings.TrimSpace(string(bytesRead))
-		lowercasedWord := strings.ToLower(string(bytesToStr))
-		sanitizedWord := strings.Replace(lowercasedWord, "\n", "", -1)
-		sanitizedWord = removeSpecial.ReplaceAllString(sanitizedWord, "")
-		matchedKeyword, err := regexp.MatchString("\\bfico\\b", sanitizedWord)
-		helpers.CheckForError(err)
-		elapsedForMatch := helpers.GetElapsedTime(input.start, "matched")
-
-		if lowercasedWord != "" && matchedKeyword {
-			matchedData := ResponseData{Elapsed: int64(elapsedForMatch), ByteCount: int64(bytesReadSize), Status: Succ}
-			input.matchedResults <- matchedData
-			return
-		}
-	}
-
-	// if file chunk completed reading without a match, it's a fail
-	input.matchedResults <- failedToMatch
-}
-
-func printOutput(outputList []ResponseData) {
+func printOutput(outputList []worker.ResponseData) {
 	// sort by elapsed time desc
 	sort.Slice(outputList, func(a, b int) bool {
 		return outputList[a].Elapsed > outputList[b].Elapsed
